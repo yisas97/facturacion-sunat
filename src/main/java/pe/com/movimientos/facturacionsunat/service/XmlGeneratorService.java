@@ -95,18 +95,27 @@ public class XmlGeneratorService {
         invoice.appendChild(createCbcElement(doc, "IssueDate", comprobante.getFechaEmision().format(DateTimeFormatter.ISO_DATE)));
         invoice.appendChild(createCbcElement(doc, "IssueTime", "00:00:00"));
 
-        // Tipo de comprobante
+        // Tipo de comprobante con atributos completos
         Element invoiceTypeCode = createCbcElement(doc, "InvoiceTypeCode", comprobante.getTipoComprobante());
-        invoiceTypeCode.setAttribute("listID", "0101"); // Catalogo 51
+        invoiceTypeCode.setAttribute("listAgencyName", "PE:SUNAT");
+        invoiceTypeCode.setAttribute("listName", "Tipo de Documento");
+        invoiceTypeCode.setAttribute("listURI", "urn:pe:gob:sunat:cpe:see:gem:catalogos:catalogo01");
+        invoiceTypeCode.setAttribute("listID", "0101"); // Catalogo 51 - Venta interna
+        invoiceTypeCode.setAttribute("name", "Tipo de Operacion");
         invoice.appendChild(invoiceTypeCode);
 
         // Observaciones
         if (comprobante.getObservaciones() != null) {
-            invoice.appendChild(createCbcElement(doc, "Note", comprobante.getObservaciones()));
+            Element note = createCbcElement(doc, "Note", comprobante.getObservaciones());
+            note.setAttribute("languageLocaleID", "1000");
+            invoice.appendChild(note);
         }
 
-        // Moneda
+        // Moneda con atributos
         Element documentCurrencyCode = createCbcElement(doc, "DocumentCurrencyCode", comprobante.getMoneda());
+        documentCurrencyCode.setAttribute("listID", "ISO 4217 Alpha");
+        documentCurrencyCode.setAttribute("listName", "Currency");
+        documentCurrencyCode.setAttribute("listAgencyName", "United Nations Economic Commission for Europe");
         invoice.appendChild(documentCurrencyCode);
 
         // Cantidad de items
@@ -120,6 +129,12 @@ public class XmlGeneratorService {
 
         // Datos del cliente
         invoice.appendChild(createCliente(doc, comprobante));
+
+        // Condiciones de pago (Contado)
+        Element paymentTerms = createCacElement(doc, "PaymentTerms");
+        paymentTerms.appendChild(createCbcElement(doc, "ID", "FormaPago"));
+        paymentTerms.appendChild(createCbcElement(doc, "PaymentMeansID", "Contado"));
+        invoice.appendChild(paymentTerms);
 
         // Totales de impuestos
         invoice.appendChild(createTaxTotal(doc, comprobante));
