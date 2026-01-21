@@ -7,7 +7,6 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import pe.com.movimientos.facturacionsunat.dto.*;
-import pe.com.movimientos.facturacionsunat.entity.Comprobante;
 import pe.com.movimientos.facturacionsunat.entity.Emisor;
 import pe.com.movimientos.facturacionsunat.service.EmisorService;
 import pe.com.movimientos.facturacionsunat.service.FacturacionService;
@@ -95,8 +94,8 @@ public class FacturaController {
      * GET /api/sunat/comprobantes?emisorId=1
      */
     @GetMapping("/comprobantes")
-    public ResponseEntity<List<Comprobante>> listarComprobantes(@RequestParam Long emisorId) {
-        List<Comprobante> comprobantes = facturacionService.listarComprobantes(emisorId);
+    public ResponseEntity<List<ComprobanteResponseDto>> listarComprobantes(@RequestParam Long emisorId) {
+        List<ComprobanteResponseDto> comprobantes = facturacionService.listarComprobantesDto(emisorId);
         return ResponseEntity.ok(comprobantes);
     }
 

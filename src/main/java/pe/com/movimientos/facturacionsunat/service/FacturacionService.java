@@ -5,6 +5,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import pe.com.movimientos.facturacionsunat.dto.ComprobanteDto;
+import pe.com.movimientos.facturacionsunat.dto.ComprobanteResponseDto;
 import pe.com.movimientos.facturacionsunat.dto.EnvioComprobanteResponse;
 import pe.com.movimientos.facturacionsunat.entity.Comprobante;
 import pe.com.movimientos.facturacionsunat.entity.ComprobanteItem;
@@ -117,6 +118,17 @@ public class FacturacionService {
      */
     public List<Comprobante> listarComprobantes(Long emisorId) {
         return comprobanteRepository.findByEmisorIdOrderByCreatedAtDesc(emisorId);
+    }
+
+    /**
+     * Lista comprobantes de un emisor como DTOs (para serialización JSON)
+     */
+    @Transactional(readOnly = true)
+    public List<ComprobanteResponseDto> listarComprobantesDto(Long emisorId) {
+        List<Comprobante> comprobantes = comprobanteRepository.findByEmisorIdOrderByCreatedAtDesc(emisorId);
+        return comprobantes.stream()
+                .map(ComprobanteResponseDto::fromEntity)
+                .toList();
     }
 
     private String generarNombreArchivo(String ruc, ComprobanteDto comprobante) {
