@@ -1,15 +1,12 @@
 package pe.com.movimientos.facturacionsunat.service;
 
-import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.Resource;
-import org.springframework.core.io.ResourceLoader;
 import org.springframework.stereotype.Service;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 import org.w3c.dom.NodeList;
+import pe.com.movimientos.facturacionsunat.entity.Emisor;
 
 import javax.xml.crypto.dsig.*;
 import javax.xml.crypto.dsig.dom.DOMSignContext;
@@ -27,7 +24,6 @@ import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
@@ -41,53 +37,43 @@ public class FirmaDigitalService {
 
     private static final String EXT_NS = "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2";
 
-    @Value("${sunat.certificado.ruta:classpath:certificado/certificado.pfx}")
-    private String certificadoRuta;
-
-    @Value("${sunat.certificado.clave:123456}")
-    private String certificadoClave;
-
-    private final ResourceLoader resourceLoader;
-
-    private PrivateKey privateKey;
-    private X509Certificate certificate;
-
-    public FirmaDigitalService(ResourceLoader resourceLoader) {
-        this.resourceLoader = resourceLoader;
-    }
-
-    @PostConstruct
-    public void init() {
-        try {
-            cargarCertificado();
-        } catch (Exception e) {
-            log.warn("No se pudo cargar el certificado: {}. La firma digital no estara disponible.", e.getMessage());
-        }
-    }
-
-    private void cargarCertificado() throws Exception {
-        Resource resource = resourceLoader.getResource(certificadoRuta);
-        if (!resource.exists()) {
-            throw new RuntimeException("Certificado no encontrado en: " + certificadoRuta);
+    /**
+     * Firma un XML usando el certificado del emisor
+     */
+    public String firmarXml(String xmlSinFirma, Emisor emisor) throws Exception {
+        if (emisor.getCertificadoPfx() == null || emisor.getCertificadoPfx().length == 0) {
+            throw new RuntimeException("El emisor no tiene certificado digital configurado");
         }
 
+        // Cargar certificado del emisor
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
-        try (InputStream is = resource.getInputStream()) {
-            keyStore.load(is, certificadoClave.toCharArray());
-        }
+        keyStore.load(new ByteArrayInputStream(emisor.getCertificadoPfx()),
+                emisor.getClaveCertificado().toCharArray());
 
         String alias = keyStore.aliases().nextElement();
-        privateKey = (PrivateKey) keyStore.getKey(alias, certificadoClave.toCharArray());
-        certificate = (X509Certificate) keyStore.getCertificate(alias);
+        PrivateKey privateKey = (PrivateKey) keyStore.getKey(alias, emisor.getClaveCertificado().toCharArray());
+        X509Certificate certificate = (X509Certificate) keyStore.getCertificate(alias);
 
-        log.info("Certificado cargado correctamente. Alias: {}", alias);
+        log.info("Firmando con certificado del emisor: {} - Alias: {}", emisor.getRuc(), alias);
+
+        return firmarDocumento(xmlSinFirma, privateKey, certificate);
     }
 
-    public String firmarXml(String xmlSinFirma) throws Exception {
-        if (privateKey == null || certificate == null) {
-            throw new RuntimeException("Certificado no cargado. Verifique la configuracion del certificado.");
-        }
+    /**
+     * Firma un XML con un certificado en bytes
+     */
+    public String firmarXml(String xmlSinFirma, byte[] certificadoPfx, String claveCertificado) throws Exception {
+        KeyStore keyStore = KeyStore.getInstance("PKCS12");
+        keyStore.load(new ByteArrayInputStream(certificadoPfx), claveCertificado.toCharArray());
 
+        String alias = keyStore.aliases().nextElement();
+        PrivateKey privateKey = (PrivateKey) keyStore.getKey(alias, claveCertificado.toCharArray());
+        X509Certificate certificate = (X509Certificate) keyStore.getCertificate(alias);
+
+        return firmarDocumento(xmlSinFirma, privateKey, certificate);
+    }
+
+    private String firmarDocumento(String xmlSinFirma, PrivateKey privateKey, X509Certificate certificate) throws Exception {
         // Parsear el XML
         DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
         dbf.setNamespaceAware(true);
@@ -148,13 +134,12 @@ public class FirmaDigitalService {
             signatureValue.setAttribute("Id", "SignatureValue");
         }
 
-        // Convertir a String SIN modificar el formato (importante!)
+        // Convertir a String SIN modificar el formato
         TransformerFactory tf = TransformerFactory.newInstance();
         Transformer transformer = tf.newTransformer();
         transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
         transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
         transformer.setOutputProperty(OutputKeys.STANDALONE, "no");
-        // NO usar INDENT - eso rompe la firma!
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         transformer.transform(new DOMSource(doc), new StreamResult(baos));
@@ -162,7 +147,10 @@ public class FirmaDigitalService {
         return baos.toString("UTF-8");
     }
 
-    public boolean isCertificadoDisponible() {
-        return privateKey != null && certificate != null;
+    /**
+     * Verifica si un emisor tiene certificado configurado
+     */
+    public boolean tieneCertificado(Emisor emisor) {
+        return emisor.getCertificadoPfx() != null && emisor.getCertificadoPfx().length > 0;
     }
 }

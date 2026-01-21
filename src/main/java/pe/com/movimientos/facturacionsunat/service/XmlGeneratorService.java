@@ -1,13 +1,12 @@
 package pe.com.movimientos.facturacionsunat.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import pe.com.movimientos.facturacionsunat.dto.ComprobanteDto;
 import pe.com.movimientos.facturacionsunat.dto.ItemFacturaDto;
+import pe.com.movimientos.facturacionsunat.entity.Emisor;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -23,7 +22,6 @@ import java.time.format.DateTimeFormatter;
 
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class XmlGeneratorService {
 
     private static final String CBC_NS = "urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2";
@@ -31,31 +29,7 @@ public class XmlGeneratorService {
     private static final String EXT_NS = "urn:oasis:names:specification:ubl:schema:xsd:CommonExtensionComponents-2";
     private static final String DS_NS = "http://www.w3.org/2000/09/xmldsig#";
 
-    @Value("${sunat.ruc}")
-    private String emisorRuc;
-
-    @Value("${sunat.emisor.razonSocial:MI EMPRESA SAC}")
-    private String emisorRazonSocial;
-
-    @Value("${sunat.emisor.nombreComercial:MI EMPRESA}")
-    private String emisorNombreComercial;
-
-    @Value("${sunat.emisor.ubigeo:150101}")
-    private String emisorUbigeo;
-
-    @Value("${sunat.emisor.direccion:AV. PRINCIPAL 123}")
-    private String emisorDireccion;
-
-    @Value("${sunat.emisor.departamento:LIMA}")
-    private String emisorDepartamento;
-
-    @Value("${sunat.emisor.provincia:LIMA}")
-    private String emisorProvincia;
-
-    @Value("${sunat.emisor.distrito:LIMA}")
-    private String emisorDistrito;
-
-    public String generarXmlFactura(ComprobanteDto comprobante) throws Exception {
+    public String generarXmlFactura(ComprobanteDto comprobante, Emisor emisor) throws Exception {
         // Calcular totales
         calcularTotales(comprobante);
 
@@ -100,7 +74,7 @@ public class XmlGeneratorService {
         invoiceTypeCode.setAttribute("listAgencyName", "PE:SUNAT");
         invoiceTypeCode.setAttribute("listName", "Tipo de Documento");
         invoiceTypeCode.setAttribute("listURI", "urn:pe:gob:sunat:cpe:see:gem:catalogos:catalogo01");
-        invoiceTypeCode.setAttribute("listID", "0101"); // Catalogo 51 - Venta interna
+        invoiceTypeCode.setAttribute("listID", comprobante.getTipoOperacion());
         invoiceTypeCode.setAttribute("name", "Tipo de Operacion");
         invoice.appendChild(invoiceTypeCode);
 
@@ -122,18 +96,18 @@ public class XmlGeneratorService {
         invoice.appendChild(createCbcElement(doc, "LineCountNumeric", String.valueOf(comprobante.getItems().size())));
 
         // Firma (referencia)
-        invoice.appendChild(createSignature(doc));
+        invoice.appendChild(createSignature(doc, emisor));
 
         // Datos del emisor
-        invoice.appendChild(createEmisor(doc));
+        invoice.appendChild(createEmisor(doc, emisor));
 
         // Datos del cliente
         invoice.appendChild(createCliente(doc, comprobante));
 
-        // Condiciones de pago (Contado)
+        // Condiciones de pago
         Element paymentTerms = createCacElement(doc, "PaymentTerms");
         paymentTerms.appendChild(createCbcElement(doc, "ID", "FormaPago"));
-        paymentTerms.appendChild(createCbcElement(doc, "PaymentMeansID", "Contado"));
+        paymentTerms.appendChild(createCbcElement(doc, "PaymentMeansID", comprobante.getFormaPago()));
         invoice.appendChild(paymentTerms);
 
         // Totales de impuestos
@@ -162,19 +136,39 @@ public class XmlGeneratorService {
 
     private void calcularTotales(ComprobanteDto comprobante) {
         BigDecimal totalGravadas = BigDecimal.ZERO;
+        BigDecimal totalExoneradas = BigDecimal.ZERO;
+        BigDecimal totalInafectas = BigDecimal.ZERO;
         BigDecimal totalIgv = BigDecimal.ZERO;
 
         for (ItemFacturaDto item : comprobante.getItems()) {
-            BigDecimal subtotal = item.getPrecioUnitario().multiply(item.getCantidad());
-            if ("10".equals(item.getTipoAfectacionIgv())) {
+            BigDecimal subtotal = item.getPrecioUnitario().multiply(item.getCantidad()).setScale(2, RoundingMode.HALF_UP);
+            item.setSubtotal(subtotal);
+
+            String tipoAfectacion = item.getTipoAfectacionIgv() != null ? item.getTipoAfectacionIgv() : "10";
+            BigDecimal porcentajeIgv = item.getPorcentajeIgv() != null ? item.getPorcentajeIgv() : new BigDecimal("18");
+
+            if (tipoAfectacion.startsWith("1")) { // Gravado (10, 11, 12, etc.)
                 totalGravadas = totalGravadas.add(subtotal);
-                totalIgv = totalIgv.add(subtotal.multiply(new BigDecimal("0.18")));
+                BigDecimal igvItem = subtotal.multiply(porcentajeIgv).divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
+                item.setIgv(igvItem);
+                item.setTotal(subtotal.add(igvItem));
+                totalIgv = totalIgv.add(igvItem);
+            } else if (tipoAfectacion.startsWith("2")) { // Exonerado
+                totalExoneradas = totalExoneradas.add(subtotal);
+                item.setIgv(BigDecimal.ZERO);
+                item.setTotal(subtotal);
+            } else if (tipoAfectacion.startsWith("3")) { // Inafecto
+                totalInafectas = totalInafectas.add(subtotal);
+                item.setIgv(BigDecimal.ZERO);
+                item.setTotal(subtotal);
             }
         }
 
-        comprobante.setTotalGravadas(totalGravadas.setScale(2, RoundingMode.HALF_UP));
-        comprobante.setTotalIgv(totalIgv.setScale(2, RoundingMode.HALF_UP));
-        comprobante.setTotalVenta(totalGravadas.add(totalIgv).setScale(2, RoundingMode.HALF_UP));
+        comprobante.setTotalGravadas(totalGravadas);
+        comprobante.setTotalExoneradas(totalExoneradas);
+        comprobante.setTotalInafectas(totalInafectas);
+        comprobante.setTotalIgv(totalIgv);
+        comprobante.setTotalVenta(totalGravadas.add(totalExoneradas).add(totalInafectas).add(totalIgv));
     }
 
     private Element createCbcElement(Document doc, String name, String value) {
@@ -187,17 +181,17 @@ public class XmlGeneratorService {
         return doc.createElementNS(CAC_NS, "cac:" + name);
     }
 
-    private Element createSignature(Document doc) {
+    private Element createSignature(Document doc, Emisor emisor) {
         Element signature = createCacElement(doc, "Signature");
         signature.appendChild(createCbcElement(doc, "ID", "IDSignature"));
 
         Element signatoryParty = createCacElement(doc, "SignatoryParty");
         Element partyIdentification = createCacElement(doc, "PartyIdentification");
-        partyIdentification.appendChild(createCbcElement(doc, "ID", emisorRuc));
+        partyIdentification.appendChild(createCbcElement(doc, "ID", emisor.getRuc()));
         signatoryParty.appendChild(partyIdentification);
 
         Element partyName = createCacElement(doc, "PartyName");
-        partyName.appendChild(createCbcElement(doc, "Name", emisorRazonSocial));
+        partyName.appendChild(createCbcElement(doc, "Name", emisor.getRazonSocial()));
         signatoryParty.appendChild(partyName);
         signature.appendChild(signatoryParty);
 
@@ -210,35 +204,36 @@ public class XmlGeneratorService {
         return signature;
     }
 
-    private Element createEmisor(Document doc) {
+    private Element createEmisor(Document doc, Emisor emisor) {
         Element accountingSupplierParty = createCacElement(doc, "AccountingSupplierParty");
         Element party = createCacElement(doc, "Party");
 
         // Identificacion
         Element partyIdentification = createCacElement(doc, "PartyIdentification");
-        Element id = createCbcElement(doc, "ID", emisorRuc);
+        Element id = createCbcElement(doc, "ID", emisor.getRuc());
         id.setAttribute("schemeID", "6"); // RUC
         partyIdentification.appendChild(id);
         party.appendChild(partyIdentification);
 
         // Nombre comercial
         Element partyName = createCacElement(doc, "PartyName");
-        partyName.appendChild(createCbcElement(doc, "Name", emisorNombreComercial));
+        String nombreComercial = emisor.getNombreComercial() != null ? emisor.getNombreComercial() : emisor.getRazonSocial();
+        partyName.appendChild(createCbcElement(doc, "Name", nombreComercial));
         party.appendChild(partyName);
 
         // Direccion
         Element partyLegalEntity = createCacElement(doc, "PartyLegalEntity");
-        partyLegalEntity.appendChild(createCbcElement(doc, "RegistrationName", emisorRazonSocial));
+        partyLegalEntity.appendChild(createCbcElement(doc, "RegistrationName", emisor.getRazonSocial()));
 
         Element registrationAddress = createCacElement(doc, "RegistrationAddress");
-        registrationAddress.appendChild(createCbcElement(doc, "ID", emisorUbigeo));
+        registrationAddress.appendChild(createCbcElement(doc, "ID", emisor.getUbigeo() != null ? emisor.getUbigeo() : "150101"));
         registrationAddress.appendChild(createCbcElement(doc, "AddressTypeCode", "0000"));
-        registrationAddress.appendChild(createCbcElement(doc, "CityName", emisorProvincia));
-        registrationAddress.appendChild(createCbcElement(doc, "CountrySubentity", emisorDepartamento));
-        registrationAddress.appendChild(createCbcElement(doc, "District", emisorDistrito));
+        registrationAddress.appendChild(createCbcElement(doc, "CityName", emisor.getProvincia() != null ? emisor.getProvincia() : "LIMA"));
+        registrationAddress.appendChild(createCbcElement(doc, "CountrySubentity", emisor.getDepartamento() != null ? emisor.getDepartamento() : "LIMA"));
+        registrationAddress.appendChild(createCbcElement(doc, "District", emisor.getDistrito() != null ? emisor.getDistrito() : "LIMA"));
 
         Element addressLine = createCacElement(doc, "AddressLine");
-        addressLine.appendChild(createCbcElement(doc, "Line", emisorDireccion));
+        addressLine.appendChild(createCbcElement(doc, "Line", emisor.getDireccion() != null ? emisor.getDireccion() : "-"));
         registrationAddress.appendChild(addressLine);
 
         Element country = createCacElement(doc, "Country");
@@ -280,32 +275,57 @@ public class XmlGeneratorService {
         taxTotal.appendChild(taxAmount);
 
         // IGV
+        if (comprobante.getTotalGravadas().compareTo(BigDecimal.ZERO) > 0) {
+            taxTotal.appendChild(createTaxSubtotal(doc, comprobante.getTotalGravadas(), comprobante.getTotalIgv(),
+                    comprobante.getMoneda(), "1000", "IGV", "VAT"));
+        }
+
+        // Exonerado
+        if (comprobante.getTotalExoneradas() != null && comprobante.getTotalExoneradas().compareTo(BigDecimal.ZERO) > 0) {
+            taxTotal.appendChild(createTaxSubtotal(doc, comprobante.getTotalExoneradas(), BigDecimal.ZERO,
+                    comprobante.getMoneda(), "9997", "EXO", "VAT"));
+        }
+
+        // Inafecto
+        if (comprobante.getTotalInafectas() != null && comprobante.getTotalInafectas().compareTo(BigDecimal.ZERO) > 0) {
+            taxTotal.appendChild(createTaxSubtotal(doc, comprobante.getTotalInafectas(), BigDecimal.ZERO,
+                    comprobante.getMoneda(), "9998", "INA", "FRE"));
+        }
+
+        return taxTotal;
+    }
+
+    private Element createTaxSubtotal(Document doc, BigDecimal taxableAmount, BigDecimal taxAmount,
+                                       String moneda, String taxId, String taxName, String taxTypeCode) {
         Element taxSubtotal = createCacElement(doc, "TaxSubtotal");
 
-        Element taxableAmount = createCbcElement(doc, "TaxableAmount", comprobante.getTotalGravadas().toString());
-        taxableAmount.setAttribute("currencyID", comprobante.getMoneda());
-        taxSubtotal.appendChild(taxableAmount);
+        Element taxableAmountEl = createCbcElement(doc, "TaxableAmount", taxableAmount.toString());
+        taxableAmountEl.setAttribute("currencyID", moneda);
+        taxSubtotal.appendChild(taxableAmountEl);
 
-        Element taxAmountSub = createCbcElement(doc, "TaxAmount", comprobante.getTotalIgv().toString());
-        taxAmountSub.setAttribute("currencyID", comprobante.getMoneda());
-        taxSubtotal.appendChild(taxAmountSub);
+        Element taxAmountEl = createCbcElement(doc, "TaxAmount", taxAmount.toString());
+        taxAmountEl.setAttribute("currencyID", moneda);
+        taxSubtotal.appendChild(taxAmountEl);
 
         Element taxCategory = createCacElement(doc, "TaxCategory");
         Element taxScheme = createCacElement(doc, "TaxScheme");
-        taxScheme.appendChild(createCbcElement(doc, "ID", "1000"));
-        taxScheme.appendChild(createCbcElement(doc, "Name", "IGV"));
-        taxScheme.appendChild(createCbcElement(doc, "TaxTypeCode", "VAT"));
+        taxScheme.appendChild(createCbcElement(doc, "ID", taxId));
+        taxScheme.appendChild(createCbcElement(doc, "Name", taxName));
+        taxScheme.appendChild(createCbcElement(doc, "TaxTypeCode", taxTypeCode));
         taxCategory.appendChild(taxScheme);
         taxSubtotal.appendChild(taxCategory);
 
-        taxTotal.appendChild(taxSubtotal);
-        return taxTotal;
+        return taxSubtotal;
     }
 
     private Element createLegalMonetaryTotal(Document doc, ComprobanteDto comprobante) {
         Element legalMonetaryTotal = createCacElement(doc, "LegalMonetaryTotal");
 
-        Element lineExtensionAmount = createCbcElement(doc, "LineExtensionAmount", comprobante.getTotalGravadas().toString());
+        BigDecimal lineExtension = comprobante.getTotalGravadas()
+                .add(comprobante.getTotalExoneradas() != null ? comprobante.getTotalExoneradas() : BigDecimal.ZERO)
+                .add(comprobante.getTotalInafectas() != null ? comprobante.getTotalInafectas() : BigDecimal.ZERO);
+
+        Element lineExtensionAmount = createCbcElement(doc, "LineExtensionAmount", lineExtension.toString());
         lineExtensionAmount.setAttribute("currencyID", comprobante.getMoneda());
         legalMonetaryTotal.appendChild(lineExtensionAmount);
 
@@ -326,18 +346,19 @@ public class XmlGeneratorService {
         invoiceLine.appendChild(createCbcElement(doc, "ID", String.valueOf(lineNumber)));
 
         Element invoicedQuantity = createCbcElement(doc, "InvoicedQuantity", item.getCantidad().toString());
-        invoicedQuantity.setAttribute("unitCode", item.getUnidadMedida());
+        invoicedQuantity.setAttribute("unitCode", item.getUnidadMedida() != null ? item.getUnidadMedida() : "NIU");
         invoiceLine.appendChild(invoicedQuantity);
 
-        BigDecimal subtotal = item.getPrecioUnitario().multiply(item.getCantidad()).setScale(2, RoundingMode.HALF_UP);
-        Element lineExtensionAmount = createCbcElement(doc, "LineExtensionAmount", subtotal.toString());
+        Element lineExtensionAmount = createCbcElement(doc, "LineExtensionAmount", item.getSubtotal().toString());
         lineExtensionAmount.setAttribute("currencyID", moneda);
         invoiceLine.appendChild(lineExtensionAmount);
 
         // Precio con IGV
         Element pricingReference = createCacElement(doc, "PricingReference");
         Element alternativeConditionPrice = createCacElement(doc, "AlternativeConditionPrice");
-        BigDecimal precioConIgv = item.getPrecioUnitario().multiply(new BigDecimal("1.18")).setScale(2, RoundingMode.HALF_UP);
+        BigDecimal porcentajeIgv = item.getPorcentajeIgv() != null ? item.getPorcentajeIgv() : new BigDecimal("18");
+        BigDecimal precioConIgv = item.getPrecioUnitario().multiply(BigDecimal.ONE.add(porcentajeIgv.divide(new BigDecimal("100"), 4, RoundingMode.HALF_UP)))
+                .setScale(2, RoundingMode.HALF_UP);
         Element priceAmount = createCbcElement(doc, "PriceAmount", precioConIgv.toString());
         priceAmount.setAttribute("currencyID", moneda);
         alternativeConditionPrice.appendChild(priceAmount);
@@ -347,23 +368,22 @@ public class XmlGeneratorService {
 
         // Impuestos del item
         Element taxTotal = createCacElement(doc, "TaxTotal");
-        BigDecimal igvItem = subtotal.multiply(new BigDecimal("0.18")).setScale(2, RoundingMode.HALF_UP);
-        Element taxAmount = createCbcElement(doc, "TaxAmount", igvItem.toString());
+        Element taxAmount = createCbcElement(doc, "TaxAmount", item.getIgv().toString());
         taxAmount.setAttribute("currencyID", moneda);
         taxTotal.appendChild(taxAmount);
 
         Element taxSubtotal = createCacElement(doc, "TaxSubtotal");
-        Element taxableAmount = createCbcElement(doc, "TaxableAmount", subtotal.toString());
+        Element taxableAmount = createCbcElement(doc, "TaxableAmount", item.getSubtotal().toString());
         taxableAmount.setAttribute("currencyID", moneda);
         taxSubtotal.appendChild(taxableAmount);
 
-        Element taxAmountSub = createCbcElement(doc, "TaxAmount", igvItem.toString());
+        Element taxAmountSub = createCbcElement(doc, "TaxAmount", item.getIgv().toString());
         taxAmountSub.setAttribute("currencyID", moneda);
         taxSubtotal.appendChild(taxAmountSub);
 
         Element taxCategory = createCacElement(doc, "TaxCategory");
-        taxCategory.appendChild(createCbcElement(doc, "Percent", "18"));
-        taxCategory.appendChild(createCbcElement(doc, "TaxExemptionReasonCode", item.getTipoAfectacionIgv()));
+        taxCategory.appendChild(createCbcElement(doc, "Percent", porcentajeIgv.toString()));
+        taxCategory.appendChild(createCbcElement(doc, "TaxExemptionReasonCode", item.getTipoAfectacionIgv() != null ? item.getTipoAfectacionIgv() : "10"));
 
         Element taxScheme = createCacElement(doc, "TaxScheme");
         taxScheme.appendChild(createCbcElement(doc, "ID", "1000"));
@@ -379,9 +399,11 @@ public class XmlGeneratorService {
         Element itemElement = createCacElement(doc, "Item");
         itemElement.appendChild(createCbcElement(doc, "Description", item.getDescripcion()));
 
-        Element sellersItemIdentification = createCacElement(doc, "SellersItemIdentification");
-        sellersItemIdentification.appendChild(createCbcElement(doc, "ID", item.getCodigo()));
-        itemElement.appendChild(sellersItemIdentification);
+        if (item.getCodigo() != null && !item.getCodigo().isEmpty()) {
+            Element sellersItemIdentification = createCacElement(doc, "SellersItemIdentification");
+            sellersItemIdentification.appendChild(createCbcElement(doc, "ID", item.getCodigo()));
+            itemElement.appendChild(sellersItemIdentification);
+        }
 
         invoiceLine.appendChild(itemElement);
 
@@ -395,9 +417,9 @@ public class XmlGeneratorService {
         return invoiceLine;
     }
 
-    public String getNombreArchivo(ComprobanteDto comprobante) {
+    public String getNombreArchivo(ComprobanteDto comprobante, Emisor emisor) {
         return String.format("%s-%s-%s-%08d.xml",
-                emisorRuc,
+                emisor.getRuc(),
                 comprobante.getTipoComprobante(),
                 comprobante.getSerie(),
                 comprobante.getCorrelativo());

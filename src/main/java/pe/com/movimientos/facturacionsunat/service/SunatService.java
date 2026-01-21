@@ -3,50 +3,83 @@ package pe.com.movimientos.facturacionsunat.service;
 import jakarta.activation.DataHandler;
 import jakarta.activation.DataSource;
 import jakarta.mail.util.ByteArrayDataSource;
-import lombok.RequiredArgsConstructor;
+import jakarta.xml.ws.BindingProvider;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.cxf.jaxws.JaxWsProxyFactoryBean;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import pe.com.movimientos.facturacionsunat.dto.EnvioComprobanteRequest;
-import pe.com.movimientos.facturacionsunat.dto.EnvioComprobanteResponse;
 import pe.com.movimientos.facturacionsunat.dto.ConsultaTicketResponse;
+import pe.com.movimientos.facturacionsunat.dto.EnvioComprobanteResponse;
+import pe.com.movimientos.facturacionsunat.entity.Emisor;
 import pe.gob.sunat.service.factura.BillService;
 import pe.gob.sunat.service.factura.StatusResponse;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.util.Base64;
+import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
 
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class SunatService {
 
-    private final BillService billService;
+    @Value("${sunat.endpoint.beta}")
+    private String endpointBeta;
+
+    @Value("${sunat.endpoint.produccion}")
+    private String endpointProduccion;
 
     /**
-     * Envía una factura o boleta a SUNAT
-     * @param request Datos del comprobante (XML en base64 o texto)
-     * @return Respuesta de SUNAT con el CDR
+     * Crea un cliente SOAP configurado para el emisor
      */
-    public EnvioComprobanteResponse enviarComprobante(EnvioComprobanteRequest request) {
+    private BillService crearCliente(Emisor emisor) {
+        String endpoint = "PRODUCCION".equalsIgnoreCase(emisor.getAmbiente())
+                ? endpointProduccion
+                : endpointBeta;
+
+        JaxWsProxyFactoryBean factory = new JaxWsProxyFactoryBean();
+        factory.setServiceClass(BillService.class);
+        factory.setAddress(endpoint);
+
+        BillService port = (BillService) factory.create();
+
+        BindingProvider bindingProvider = (BindingProvider) port;
+        Map<String, Object> requestContext = bindingProvider.getRequestContext();
+
+        // Usuario SOL: RUC + Usuario
+        String username = emisor.getRuc() + emisor.getUsuarioSol();
+        requestContext.put(BindingProvider.USERNAME_PROPERTY, username);
+        requestContext.put(BindingProvider.PASSWORD_PROPERTY, emisor.getClaveSol());
+
+        log.info("Cliente SOAP creado para emisor: {} - Ambiente: {}", emisor.getRuc(), emisor.getAmbiente());
+
+        return port;
+    }
+
+    /**
+     * Envia una factura o boleta a SUNAT
+     */
+    public EnvioComprobanteResponse enviarComprobante(String nombreArchivo, String xmlFirmado, Emisor emisor) {
         try {
-            log.info("Enviando comprobante: {}", request.getNombreArchivo());
+            log.info("Enviando comprobante: {} para emisor: {}", nombreArchivo, emisor.getRuc());
+
+            BillService cliente = crearCliente(emisor);
 
             // Preparar el archivo ZIP
-            byte[] zipContent = crearZip(request.getNombreArchivo(), request.getContenidoXml());
+            byte[] zipContent = crearZip(nombreArchivo, xmlFirmado);
 
             // Crear DataHandler para el contenido
             DataSource dataSource = new ByteArrayDataSource(zipContent, "application/zip");
             DataHandler dataHandler = new DataHandler(dataSource);
 
-            // Nombre del archivo ZIP (sin extensión .xml)
-            String nombreZip = request.getNombreArchivo().replace(".xml", ".zip");
+            // Nombre del archivo ZIP
+            String nombreZip = nombreArchivo.replace(".xml", ".zip");
 
             // Enviar a SUNAT
-            byte[] respuesta = billService.sendBill(nombreZip, dataHandler, null);
+            byte[] respuesta = cliente.sendBill(nombreZip, dataHandler, null);
 
             // Procesar respuesta (CDR)
             String cdrBase64 = Base64.getEncoder().encodeToString(respuesta);
@@ -70,23 +103,22 @@ public class SunatService {
     }
 
     /**
-     * Envía un resumen diario o comunicación de baja a SUNAT
-     * @param request Datos del resumen
-     * @return Ticket para consulta posterior
+     * Envia un resumen diario o comunicacion de baja a SUNAT
      */
-    public EnvioComprobanteResponse enviarResumen(EnvioComprobanteRequest request) {
+    public EnvioComprobanteResponse enviarResumen(String nombreArchivo, String xmlFirmado, Emisor emisor) {
         try {
-            log.info("Enviando resumen: {}", request.getNombreArchivo());
+            log.info("Enviando resumen: {} para emisor: {}", nombreArchivo, emisor.getRuc());
 
-            byte[] zipContent = crearZip(request.getNombreArchivo(), request.getContenidoXml());
+            BillService cliente = crearCliente(emisor);
 
+            byte[] zipContent = crearZip(nombreArchivo, xmlFirmado);
             DataSource dataSource = new ByteArrayDataSource(zipContent, "application/zip");
             DataHandler dataHandler = new DataHandler(dataSource);
 
-            String nombreZip = request.getNombreArchivo().replace(".xml", ".zip");
+            String nombreZip = nombreArchivo.replace(".xml", ".zip");
 
             // SendSummary retorna un ticket
-            String ticket = billService.sendSummary(nombreZip, dataHandler, null);
+            String ticket = cliente.sendSummary(nombreZip, dataHandler, null);
 
             return EnvioComprobanteResponse.builder()
                     .exitoso(true)
@@ -105,15 +137,15 @@ public class SunatService {
     }
 
     /**
-     * Consulta el estado de un ticket (para resúmenes y bajas)
-     * @param ticket Ticket obtenido al enviar resumen
-     * @return Estado del procesamiento
+     * Consulta el estado de un ticket
      */
-    public ConsultaTicketResponse consultarTicket(String ticket) {
+    public ConsultaTicketResponse consultarTicket(String ticket, Emisor emisor) {
         try {
-            log.info("Consultando ticket: {}", ticket);
+            log.info("Consultando ticket: {} para emisor: {}", ticket, emisor.getRuc());
 
-            StatusResponse status = billService.getStatus(ticket);
+            BillService cliente = crearCliente(emisor);
+
+            StatusResponse status = cliente.getStatus(ticket);
 
             String cdrBase64 = null;
             String cdrXml = null;
@@ -140,54 +172,12 @@ public class SunatService {
         }
     }
 
-    /**
-     * Envía un paquete de comprobantes a SUNAT
-     */
-    public EnvioComprobanteResponse enviarPaquete(EnvioComprobanteRequest request) {
-        try {
-            log.info("Enviando paquete: {}", request.getNombreArchivo());
-
-            byte[] zipContent = crearZip(request.getNombreArchivo(), request.getContenidoXml());
-
-            DataSource dataSource = new ByteArrayDataSource(zipContent, "application/zip");
-            DataHandler dataHandler = new DataHandler(dataSource);
-
-            String nombreZip = request.getNombreArchivo().replace(".xml", ".zip");
-
-            String ticket = billService.sendPack(nombreZip, dataHandler, null);
-
-            return EnvioComprobanteResponse.builder()
-                    .exitoso(true)
-                    .ticket(ticket)
-                    .mensaje("Paquete enviado. Ticket: " + ticket)
-                    .build();
-
-        } catch (Exception e) {
-            log.error("Error al enviar paquete: {}", e.getMessage(), e);
-            return EnvioComprobanteResponse.builder()
-                    .exitoso(false)
-                    .mensaje("Error: " + e.getMessage())
-                    .codigoError(extraerCodigoError(e.getMessage()))
-                    .build();
-        }
-    }
-
     private byte[] crearZip(String nombreArchivo, String contenidoXml) throws Exception {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (ZipOutputStream zos = new ZipOutputStream(baos)) {
             ZipEntry entry = new ZipEntry(nombreArchivo);
             zos.putNextEntry(entry);
-
-            byte[] xmlBytes;
-            // Verificar si el contenido ya está en base64
-            try {
-                xmlBytes = Base64.getDecoder().decode(contenidoXml);
-            } catch (IllegalArgumentException e) {
-                // No es base64, usar como texto plano
-                xmlBytes = contenidoXml.getBytes("UTF-8");
-            }
-
-            zos.write(xmlBytes);
+            zos.write(contenidoXml.getBytes("UTF-8"));
             zos.closeEntry();
         }
         return baos.toByteArray();

@@ -1,13 +1,20 @@
 package pe.com.movimientos.facturacionsunat.controller;
 
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import pe.com.movimientos.facturacionsunat.dto.*;
+import pe.com.movimientos.facturacionsunat.entity.Comprobante;
+import pe.com.movimientos.facturacionsunat.entity.Emisor;
+import pe.com.movimientos.facturacionsunat.service.EmisorService;
 import pe.com.movimientos.facturacionsunat.service.FacturacionService;
 import pe.com.movimientos.facturacionsunat.service.SunatService;
+
+import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/api/sunat")
@@ -17,6 +24,7 @@ public class FacturaController {
 
     private final SunatService sunatService;
     private final FacturacionService facturacionService;
+    private final EmisorService emisorService;
 
     /**
      * ENDPOINT PRINCIPAL - Emitir factura/boleta completa
@@ -25,8 +33,9 @@ public class FacturaController {
      */
     @PostMapping("/factura/emitir")
     public ResponseEntity<EnvioComprobanteResponse> emitirFactura(
-            @RequestBody ComprobanteDto comprobante) {
-        log.info("Emitiendo comprobante: {}-{}", comprobante.getSerie(), comprobante.getCorrelativo());
+            @Valid @RequestBody ComprobanteDto comprobante) {
+        log.info("Emitiendo comprobante: {}-{} para emisor ID: {}",
+                comprobante.getSerie(), comprobante.getCorrelativo(), comprobante.getEmisorId());
         EnvioComprobanteResponse response = facturacionService.emitirComprobante(comprobante);
         return response.isExitoso()
                 ? ResponseEntity.ok(response)
@@ -38,7 +47,7 @@ public class FacturaController {
      * POST /api/sunat/factura/preview
      */
     @PostMapping(value = "/factura/preview", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> previewXml(@RequestBody ComprobanteDto comprobante) {
+    public ResponseEntity<String> previewXml(@Valid @RequestBody ComprobanteDto comprobante) {
         try {
             String xml = facturacionService.generarXmlPreview(comprobante);
             return ResponseEntity.ok(xml);
@@ -53,7 +62,7 @@ public class FacturaController {
      * POST /api/sunat/factura/firmar
      */
     @PostMapping(value = "/factura/firmar", produces = MediaType.APPLICATION_XML_VALUE)
-    public ResponseEntity<String> firmarXml(@RequestBody ComprobanteDto comprobante) {
+    public ResponseEntity<String> firmarXml(@Valid @RequestBody ComprobanteDto comprobante) {
         try {
             String xmlFirmado = facturacionService.generarXmlFirmado(comprobante);
             return ResponseEntity.ok(xmlFirmado);
@@ -63,59 +72,45 @@ public class FacturaController {
         }
     }
 
-    // ==================== ENDPOINTS ORIGINALES ====================
-
     /**
-     * Envia un XML ya preparado a SUNAT
-     * POST /api/sunat/comprobante
+     * Obtiene el siguiente correlativo disponible
+     * GET /api/sunat/correlativo?emisorId=1&tipoComprobante=01&serie=F001
      */
-    @PostMapping("/comprobante")
-    public ResponseEntity<EnvioComprobanteResponse> enviarComprobante(
-            @RequestBody EnvioComprobanteRequest request) {
-        log.info("Recibida solicitud para enviar comprobante: {}", request.getNombreArchivo());
-        EnvioComprobanteResponse response = sunatService.enviarComprobante(request);
-        return response.isExitoso()
-                ? ResponseEntity.ok(response)
-                : ResponseEntity.badRequest().body(response);
+    @GetMapping("/correlativo")
+    public ResponseEntity<Map<String, Object>> obtenerSiguienteCorrelativo(
+            @RequestParam Long emisorId,
+            @RequestParam String tipoComprobante,
+            @RequestParam String serie) {
+        Integer correlativo = facturacionService.obtenerSiguienteCorrelativo(emisorId, tipoComprobante, serie);
+        return ResponseEntity.ok(Map.of(
+                "emisorId", emisorId,
+                "tipoComprobante", tipoComprobante,
+                "serie", serie,
+                "correlativo", correlativo
+        ));
     }
 
     /**
-     * Envia un resumen diario o comunicacion de baja a SUNAT
-     * POST /api/sunat/resumen
+     * Lista comprobantes de un emisor
+     * GET /api/sunat/comprobantes?emisorId=1
      */
-    @PostMapping("/resumen")
-    public ResponseEntity<EnvioComprobanteResponse> enviarResumen(
-            @RequestBody EnvioComprobanteRequest request) {
-        log.info("Recibida solicitud para enviar resumen: {}", request.getNombreArchivo());
-        EnvioComprobanteResponse response = sunatService.enviarResumen(request);
-        return response.isExitoso()
-                ? ResponseEntity.ok(response)
-                : ResponseEntity.badRequest().body(response);
-    }
-
-    /**
-     * Envia un paquete de comprobantes a SUNAT
-     * POST /api/sunat/paquete
-     */
-    @PostMapping("/paquete")
-    public ResponseEntity<EnvioComprobanteResponse> enviarPaquete(
-            @RequestBody EnvioComprobanteRequest request) {
-        log.info("Recibida solicitud para enviar paquete: {}", request.getNombreArchivo());
-        EnvioComprobanteResponse response = sunatService.enviarPaquete(request);
-        return response.isExitoso()
-                ? ResponseEntity.ok(response)
-                : ResponseEntity.badRequest().body(response);
+    @GetMapping("/comprobantes")
+    public ResponseEntity<List<Comprobante>> listarComprobantes(@RequestParam Long emisorId) {
+        List<Comprobante> comprobantes = facturacionService.listarComprobantes(emisorId);
+        return ResponseEntity.ok(comprobantes);
     }
 
     /**
      * Consulta el estado de un ticket
-     * GET /api/sunat/ticket/{ticket}
+     * GET /api/sunat/ticket/{ticket}?emisorId=1
      */
     @GetMapping("/ticket/{ticket}")
     public ResponseEntity<ConsultaTicketResponse> consultarTicket(
-            @PathVariable String ticket) {
-        log.info("Consultando ticket: {}", ticket);
-        ConsultaTicketResponse response = sunatService.consultarTicket(ticket);
+            @PathVariable String ticket,
+            @RequestParam Long emisorId) {
+        log.info("Consultando ticket: {} para emisor ID: {}", ticket, emisorId);
+        Emisor emisor = emisorService.obtenerPorId(emisorId);
+        ConsultaTicketResponse response = sunatService.consultarTicket(ticket, emisor);
         return response.isExitoso()
                 ? ResponseEntity.ok(response)
                 : ResponseEntity.badRequest().body(response);

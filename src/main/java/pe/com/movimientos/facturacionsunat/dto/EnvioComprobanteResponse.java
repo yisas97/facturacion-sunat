@@ -40,4 +40,9 @@ public class EnvioComprobanteResponse {
      * Código de error de SUNAT (si aplica)
      */
     private String codigoError;
+
+    /**
+     * ID del comprobante guardado en BD
+     */
+    private Long comprobanteId;
 }
